@@ -2,10 +2,6 @@
 
 This API takes an image URL and JSON data, processes the image, and sends the response in Base64 format.
 
-### Endpoint
-
-`POST /process-image`
-
 ### Request
 
 - **URL**: The URL of the image to be processed.
