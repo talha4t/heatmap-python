@@ -1,65 +1,70 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
-import requests
-from io import BytesIO
-from PIL import Image
+from PIL import Image, ImageDraw
 import base64
-import folium
-from folium.plugins import HeatMap
-import os
+import io
+import requests
 
 app = FastAPI()
 
-class HeatMapRequest(BaseModel):
+class HeatmapRequest(BaseModel):
     imageUrl: str
     jsonData: list
+    point_radius: int = 10
+    heatmap_opacity: int = 128
+
+
+def create_heatmap_from_json(image_url, json_data, point_radius=10, heatmap_opacity=128):
+    try:
+        response = requests.get(image_url, stream=True)
+        response.raise_for_status()
+        image = Image.open(response.raw)
+
+        if image.mode != "RGBA":
+            image = image.convert("RGBA")
+        
+        heatmap = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(heatmap)
+
+        for item in json_data:
+            x = item['x']
+            y = item['y']
+            screen_width = item.get('screen_width', image.width)
+            screen_height = item.get('screen_height', image.height)
+            pixel_x = int(x * image.width / screen_width)
+            pixel_y = int(y * image.height / screen_height)
+
+            draw.ellipse(
+                [
+                    pixel_x - point_radius, pixel_y - point_radius, 
+                    pixel_x + point_radius, pixel_y + point_radius
+                ],
+                fill=(255, 0, 0, heatmap_opacity)
+            )
+
+        heatmap_image = Image.alpha_composite(image, heatmap)
+        return heatmap_image
+
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=400, detail=f"Error downloading image: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+
 
 @app.post("/api/getHeatMap")
-async def generate_heatmap(request: HeatMapRequest):
-    # Step 1: Download the image
+async def generate_heatmap(request: HeatmapRequest):
     try:
-        response = requests.get(request.imageUrl)
-        response.raise_for_status()
-        image = Image.open(BytesIO(response.content))
+        heatmap_image = create_heatmap_from_json(
+            image_url=request.imageUrl,
+            json_data=request.jsonData,
+            point_radius=request.point_radius,
+            heatmap_opacity=request.heatmap_opacity
+        )
+
+        buffered = io.BytesIO()
+        heatmap_image.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        return {"base64_image": img_str}
+
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to load image: {str(e)}")
-    
-    # Step 2: Get the image size and prepare coordinates
-    width, height = image.size
-    heatmap_data = []
-
-    for point in request.jsonData:
-        try:
-            x = point["x"] * width / 100  # Convert x percentage to pixel
-            y = point["y"] * height / 100  # Convert y percentage to pixel
-            heatmap_data.append([height - y, x])  # Invert y-axis for image coordinate system
-        except KeyError:
-            raise HTTPException(status_code=400, detail="Invalid data format in JSON")
-    
-    # Step 3: Save the image as a base64-encoded string
-    image_path = "base_image.png"
-    image.save(image_path)
-    with open(image_path, "rb") as img_file:
-        encoded_image = base64.b64encode(img_file.read()).decode()
-
-    # Step 4: Create a Folium map overlay
-    map_center = [height / 2, width / 2]
-    folium_map = folium.Map(location=map_center, zoom_start=0, width="100%", height="100%", max_bounds=True)
-
-    # Overlay the image
-    folium.raster_layers.ImageOverlay(
-        image=f"data:image/png;base64,{encoded_image}",
-        bounds=[[0, 0], [height, width]],
-        opacity=1,
-    ).add_to(folium_map)
-
-    # Add heatmap layer
-    HeatMap(heatmap_data, radius=15, blur=20, max_zoom=1).add_to(folium_map)
-
-    # Save the Folium map to an HTML file
-    output_html = "heatmap_output.html"
-    folium_map.save(output_html)
-
-    # Step 5: Return the HTML file as a response
-    return FileResponse(output_html, media_type="text/html", filename="heatmap_output.html")
+        raise HTTPException(status_code=500, detail=f"Error generating heatmap: {e}")
